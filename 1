@@ -1,20 +1,23 @@
 -- ========================================
--- Neverlose完整版 - 接入UI模板
--- 使用现有的NeverloseUI.luau
--- 包含所有功能：DT, Anti-Aim, Resolver, 换肤, 完整移动
+-- Neverlose RAGE - 真正暴力版本
+-- 完全自动，瞬间锁定，自动开火
 -- ========================================
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
-local TweenService = game:GetService("TweenService")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local VirtualInputManager = game:GetService("VirtualInputManager")
 
 local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
+local Mouse = LocalPlayer:GetMouse()
 
--- 加载UI库
+-- 加载UI
+-- NeverloseUI | Roblox client UI component library
+-- Reference-inspired UI only. All icons are constructed locally; no asset IDs required.
+-- Use as a ModuleScript, or use the bundled standalone NeverloseDemo.client.luau.
 local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
@@ -1721,411 +1724,300 @@ end
 UI.Version = "1.2.0"
 
 
+-- ========================================
+-- 配置
+-- ========================================
+
+local Config = {
+    -- RAGE自瞄
+    Rage = {
+        Enabled = false,
+        FOV = 1000, -- 巨大范围
+        Smoothness = 0, -- 0 = 瞬间锁定
+        Hitbox = "Head",
+        
+        -- 自动功能
+        AutoShoot = true, -- 自动开火
+        AutoWallbang = true, -- 穿墙射击
+        IgnoreTeam = true,
+        
+        -- 暴力选项
+        InstantLock = true, -- 瞬间锁定
+        SilentAim = false, -- 关闭静默，直接锁定
+        Prediction = true,
+        PredictionStrength = 0.2,
+        
+        -- 多目标
+        LockClosest = true,
+        SwitchTarget = true,
+        SwitchDelay = 0.1,
+    },
+    
+    -- 自动开火设置
+    AutoFire = {
+        Enabled = true,
+        Method = "Mouse", -- Mouse/Tool/Both
+        FireRate = 0.05, -- 射击间隔（秒）
+        BurstMode = false,
+        BurstCount = 3,
+    },
+    
+    -- ESP
+    ESP = {
+        Enabled = true,
+        ShowTarget = true, -- 高亮当前目标
+        TargetColor = Color3.fromRGB(255, 0, 0),
+    },
+}
 
 -- ========================================
--- 核心功能模块
--- ========================================
-
 -- 反作弊绕过
-local AntiCheat = {}
-function AntiCheat:Initialize()
-    pcall(function()
-        local mt = getrawmetatable(game)
-        local oldNamecall = mt.__namecall
-        local oldIndex = mt.__index
-        
-        setreadonly(mt, false)
-        
-        mt.__namecall = newcclosure(function(self, ...)
-            local method = getnamecallmethod()
-            if method == "Kick" then return end
-            if method == "FireServer" or method == "InvokeServer" then
-                if tostring(self):lower():find("anti") then return end
-            end
-            return oldNamecall(self, ...)
-        end)
-        
-        mt.__index = newcclosure(function(self, key)
-            if self:IsA("Humanoid") then
-                if key == "WalkSpeed" and self.WalkSpeed ~= 16 then return 16 end
-                if key == "JumpPower" and self.JumpPower ~= 50 then return 50 end
-            end
-            return oldIndex(self, key)
-        end)
-        
-        setreadonly(mt, true)
+-- ========================================
+
+pcall(function()
+    local mt = getrawmetatable(game)
+    setreadonly(mt, false)
+    local oldNamecall = mt.__namecall
+    
+    mt.__namecall = newcclosure(function(self, ...)
+        local method = getnamecallmethod()
+        if method == "Kick" then return end
+        if method == "FireServer" and tostring(self):lower():find("anti") then return end
+        return oldNamecall(self, ...)
     end)
-end
+    
+    setreadonly(mt, true)
+end)
 
--- Resolver系统
-local Resolver = {
-    Targets = {},
-    Enabled = true,
+-- ========================================
+-- 真正暴力的RAGE自瞄
+-- ========================================
+
+local RageAimbot = {
+    CurrentTarget = nil,
+    LastShotTime = 0,
+    Locked = false,
 }
 
-function Resolver:GetRealPosition(player)
-    if not self.Enabled then return nil end
-    
-    local char = player.Character
-    if not char then return nil end
-    
-    local root = char:FindFirstChild("HumanoidRootPart")
-    if not root then return nil end
-    
-    if not self.Targets[player] then
-        self.Targets[player] = {
-            LastPos = root.Position,
-            MissCount = 0,
-            Mode = 1,
-        }
-    end
-    
-    local data = self.Targets[player]
-    local velocity = root.AssemblyLinearVelocity or Vector3.new()
-    local predicted = root.Position + (velocity * 0.165)
-    
-    -- 暴力破解
-    if data.MissCount > 3 then
-        if data.Mode == 1 then predicted = predicted + Vector3.new(2, 0, 0)
-        elseif data.Mode == 2 then predicted = predicted - Vector3.new(2, 0, 0)
-        elseif data.Mode == 3 then predicted = predicted + Vector3.new(0, 0, 2) end
-        data.Mode = (data.Mode % 3) + 1
-    end
-    
-    return predicted
-end
-
--- Double Tap
-local DoubleTap = {
-    Enabled = false,
-    Ready = false,
-    LastShot = 0,
-}
-
-function DoubleTap:Update()
-    if not self.Enabled then return end
-    if tick() - self.LastShot > 1 then
-        self.Ready = true
-    end
-end
-
--- Rage自瞄
-local Rage = {
-    Enabled = false,
-    FOV = 360,
-    Hitbox = "Head",
-    Silent = true,
-    Prediction = true,
-    MultiPoint = true,
-}
-
-function Rage:GetBestTarget()
-    local best = nil
-    local bestScore = -1
+-- 获取最佳目标
+function RageAimbot:GetBestTarget()
+    local bestTarget = nil
+    local bestScore = math.huge
     
     for _, player in ipairs(Players:GetPlayers()) do
-        if player == LocalPlayer or not player.Character then continue end
+        if player == LocalPlayer then continue end
+        if not player.Character then continue end
+        if Config.Rage.IgnoreTeam and player.Team == LocalPlayer.Team then continue end
         
-        local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
-        local root = player.Character:FindFirstChild("HumanoidRootPart")
-        if not humanoid or humanoid.Health <= 0 or not root then continue end
+        local char = player.Character
+        local humanoid = char:FindFirstChildOfClass("Humanoid")
+        if not humanoid or humanoid.Health <= 0 then continue end
         
-        local distance = (root.Position - Camera.CFrame.Position).Magnitude
-        local score = (2000 - distance) + (100 - humanoid.Health)
-        
-        if score > bestScore then
-            bestScore = score
-            best = player
-        end
-    end
-    
-    return best
-end
-
-function Rage:Aim()
-    if not self.Enabled then return end
-    
-    local target = self:GetBestTarget()
-    if not target then return end
-    
-    local hitPos = Resolver:GetRealPosition(target) or target.Character:FindFirstChild(self.Hitbox).Position
-    
-    if self.Prediction then
-        local part = target.Character:FindFirstChild(self.Hitbox)
-        local velocity = part.AssemblyLinearVelocity or Vector3.new()
-        hitPos = hitPos + (velocity * 0.165)
-    end
-    
-    if self.MultiPoint then
-        local offset = Vector3.new((math.random()-0.5)*0.65, (math.random()-0.5)*0.65, (math.random()-0.5)*0.65)
-        hitPos = hitPos + offset
-    end
-    
-    local cf = CFrame.new(Camera.CFrame.Position, hitPos)
-    
-    if self.Silent then
-        if UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then
-            Camera.CFrame = cf
-        end
-    else
-        Camera.CFrame = cf
-    end
-end
-
--- Legit自瞄
-local Legit = {
-    Enabled = false,
-    Key = Enum.KeyCode.E,
-    FOV = 80,
-    Smooth = 10,
-    RCS = true,
-}
-
-function Legit:Update()
-    if not self.Enabled or not UserInputService:IsKeyDown(self.Key) then return end
-    
-    local target = self:GetTarget()
-    if not target then return end
-    
-    local head = target.Character:FindFirstChild("Head")
-    if not head then return end
-    
-    local targetCF = CFrame.new(Camera.CFrame.Position, head.Position)
-    Camera.CFrame = Camera.CFrame:Lerp(targetCF, 1 / self.Smooth)
-end
-
-function Legit:GetTarget()
-    local closest = nil
-    local shortestDist = self.FOV
-    
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player == LocalPlayer or not player.Character then continue end
-        
-        local head = player.Character:FindFirstChild("Head")
+        local head = char:FindFirstChild(Config.Rage.Hitbox)
         if not head then continue end
         
-        local screenPos, onScreen = Camera:WorldToViewportPoint(head.Position)
-        if onScreen then
-            local mouse = UserInputService:GetMouseLocation()
-            local dist = (Vector2.new(screenPos.X, screenPos.Y) - mouse).Magnitude
-            if dist < shortestDist then
-                shortestDist = dist
-                closest = player
+        -- 计算距离
+        local distance = (head.Position - Camera.CFrame.Position).Magnitude
+        
+        -- FOV检查
+        if distance > Config.Rage.FOV then continue end
+        
+        -- 穿墙检查（可选）
+        if not Config.Rage.AutoWallbang then
+            local ray = Ray.new(Camera.CFrame.Position, (head.Position - Camera.CFrame.Position).Unit * distance)
+            local hit = Workspace:FindPartOnRayWithIgnoreList(ray, {LocalPlayer.Character})
+            if hit and not hit:IsDescendantOf(char) then continue end
+        end
+        
+        -- 选择最近的
+        if Config.Rage.LockClosest and distance < bestScore then
+            bestScore = distance
+            bestTarget = player
+        end
+    end
+    
+    return bestTarget
+end
+
+-- 瞄准目标
+function RageAimbot:AimAt(target)
+    if not target or not target.Character then return end
+    
+    local head = target.Character:FindFirstChild(Config.Rage.Hitbox)
+    if not head then return end
+    
+    local targetPos = head.Position
+    
+    -- 预测移动
+    if Config.Rage.Prediction then
+        local velocity = head.AssemblyLinearVelocity or Vector3.new()
+        targetPos = targetPos + (velocity * Config.Rage.PredictionStrength)
+    end
+    
+    -- 计算瞄准CFrame
+    local aimCFrame = CFrame.new(Camera.CFrame.Position, targetPos)
+    
+    -- 瞬间锁定或平滑
+    if Config.Rage.InstantLock or Config.Rage.Smoothness == 0 then
+        Camera.CFrame = aimCFrame
+    else
+        Camera.CFrame = Camera.CFrame:Lerp(aimCFrame, 1 / (Config.Rage.Smoothness + 1))
+    end
+    
+    self.Locked = true
+end
+
+-- 自动开火
+function RageAimbot:AutoShoot()
+    if not Config.AutoFire.Enabled then return end
+    if not self.Locked then return end
+    if not self.CurrentTarget then return end
+    
+    local currentTime = tick()
+    if currentTime - self.LastShotTime < Config.AutoFire.FireRate then return end
+    
+    -- 方法1: 模拟鼠标点击
+    if Config.AutoFire.Method == "Mouse" or Config.AutoFire.Method == "Both" then
+        mouse1press()
+        task.wait(0.01)
+        mouse1release()
+    end
+    
+    -- 方法2: 触发Tool
+    if Config.AutoFire.Method == "Tool" or Config.AutoFire.Method == "Both" then
+        local char = LocalPlayer.Character
+        if char then
+            local tool = char:FindFirstChildOfClass("Tool")
+            if tool then
+                tool:Activate()
+                task.wait(0.01)
+                tool:Deactivate()
             end
         end
     end
     
-    return closest
+    self.LastShotTime = currentTime
 end
 
--- Anti-Aim
-local AntiAim = {
-    Enabled = false,
-    Pitch = "Down",
-    YawMode = "Backwards",
-    YawAdd = 0,
-}
-
-function AntiAim:Update()
-    if not self.Enabled or not LocalPlayer.Character then return end
+-- 主更新循环
+function RageAimbot:Update()
+    if not Config.Rage.Enabled then 
+        self.Locked = false
+        return 
+    end
     
-    local root = LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-    if not root then return end
+    -- 获取目标
+    local newTarget = self:GetBestTarget()
     
-    local pitchAngle = -89
-    if self.Pitch == "Up" then pitchAngle = 89
-    elseif self.Pitch == "Jitter" then pitchAngle = tick() % 1 > 0.5 and 89 or -89 end
+    -- 切换目标
+    if Config.Rage.SwitchTarget then
+        if newTarget and newTarget ~= self.CurrentTarget then
+            self.CurrentTarget = newTarget
+        end
+    else
+        if not self.CurrentTarget then
+            self.CurrentTarget = newTarget
+        end
+    end
     
-    local yawAngle = self.YawAdd
-    if self.YawMode == "Backwards" then yawAngle = yawAngle + 180
-    elseif self.YawMode == "Spin" then yawAngle = yawAngle + (tick() * 360) % 360
-    elseif self.YawMode == "Jitter" then yawAngle = yawAngle + (tick() % 1 > 0.5 and 60 or -60) end
-    
-    -- 应用（仅视觉）
-    -- root.CFrame = CFrame.new(root.Position) * CFrame.Angles(math.rad(pitchAngle), math.rad(yawAngle), 0)
+    -- 瞄准
+    if self.CurrentTarget then
+        self:AimAt(self.CurrentTarget)
+        
+        -- 自动开火
+        if Config.Rage.AutoShoot then
+            self:AutoShoot()
+        end
+    else
+        self.Locked = false
+    end
 end
 
+-- ========================================
+-- FOV圈显示
+-- ========================================
+
+local FOVCircle = nil
+
+local function CreateFOVCircle()
+    if not FOVCircle then
+        FOVCircle = Drawing.new("Circle")
+        FOVCircle.Thickness = 2
+        FOVCircle.NumSides = 64
+        FOVCircle.Radius = 150
+        FOVCircle.Filled = false
+        FOVCircle.Transparency = 0.5
+        FOVCircle.Color = Color3.fromRGB(255, 75, 86)
+        FOVCircle.Visible = false
+    end
+end
+
+local function UpdateFOVCircle()
+    if not FOVCircle then return end
+    
+    if Config.Rage.Enabled then
+        local screenSize = Camera.ViewportSize
+        FOVCircle.Position = Vector2.new(screenSize.X / 2, screenSize.Y / 2)
+        FOVCircle.Radius = Config.Rage.FOV / 10 -- 视觉化显示
+        FOVCircle.Visible = true
+    else
+        FOVCircle.Visible = false
+    end
+end
+
+-- ========================================
 -- ESP系统
-local ESP = {
-    Enabled = false,
-    Objects = {},
-}
+-- ========================================
 
-function ESP:Create(player)
-    if self.Objects[player] then return end
+local ESPObjects = {}
+
+local function CreateESP(player)
+    if ESPObjects[player] then return end
     
-    local obj = {
+    local esp = {
         Highlight = Instance.new("Highlight"),
-        Billboard = Instance.new("BillboardGui"),
     }
     
-    obj.Highlight.FillColor = Color3.fromRGB(255, 100, 100)
-    obj.Highlight.FillTransparency = 0.5
-    obj.Highlight.OutlineTransparency = 0
-    obj.Highlight.Enabled = false
+    esp.Highlight.FillColor = Color3.fromRGB(255, 100, 100)
+    esp.Highlight.FillTransparency = 0.5
+    esp.Highlight.OutlineTransparency = 0
+    esp.Highlight.Enabled = false
     
-    obj.Billboard.Size = UDim2.new(0, 200, 0, 50)
-    obj.Billboard.StudsOffset = Vector3.new(0, 3, 0)
-    obj.Billboard.AlwaysOnTop = true
-    obj.Billboard.Enabled = false
-    
-    obj.NameLabel = Instance.new("TextLabel", obj.Billboard)
-    obj.NameLabel.Size = UDim2.new(1, 0, 0.5, 0)
-    obj.NameLabel.BackgroundTransparency = 1
-    obj.NameLabel.TextColor3 = Color3.new(1, 1, 1)
-    obj.NameLabel.TextStrokeTransparency = 0.5
-    obj.NameLabel.Font = Enum.Font.GothamBold
-    obj.NameLabel.TextSize = 14
-    
-    obj.InfoLabel = Instance.new("TextLabel", obj.Billboard)
-    obj.InfoLabel.Position = UDim2.new(0, 0, 0.5, 0)
-    obj.InfoLabel.Size = UDim2.new(1, 0, 0.5, 0)
-    obj.InfoLabel.BackgroundTransparency = 1
-    obj.InfoLabel.TextColor3 = Color3.new(1, 1, 1)
-    obj.InfoLabel.TextStrokeTransparency = 0.5
-    obj.InfoLabel.Font = Enum.Font.Gotham
-    obj.InfoLabel.TextSize = 12
-    
-    self.Objects[player] = obj
+    ESPObjects[player] = esp
 end
 
-function ESP:Update(player)
-    if not self.Enabled or not player.Character then return end
+local function UpdateESP(player)
+    if not Config.ESP.Enabled then return end
+    if not player.Character then return end
     
-    local char = player.Character
-    local humanoid = char:FindFirstChildOfClass("Humanoid")
-    local root = char:FindFirstChild("HumanoidRootPart")
+    if not ESPObjects[player] then CreateESP(player) end
     
-    if not humanoid or humanoid.Health <= 0 or not root then return end
+    local esp = ESPObjects[player]
+    esp.Highlight.Parent = player.Character
+    esp.Highlight.Enabled = true
     
-    if not self.Objects[player] then self:Create(player) end
-    
-    local obj = self.Objects[player]
-    
-    obj.Highlight.Parent = char
-    obj.Highlight.Enabled = true
-    
-    obj.Billboard.Parent = root
-    obj.Billboard.Enabled = true
-    
-    obj.NameLabel.Text = player.Name
-    obj.InfoLabel.Text = string.format("HP: %d | %dm", 
-        math.floor(humanoid.Health),
-        math.floor((root.Position - Camera.CFrame.Position).Magnitude))
-end
-
-function ESP:Remove(player)
-    if self.Objects[player] then
-        self.Objects[player].Highlight:Destroy()
-        self.Objects[player].Billboard:Destroy()
-        self.Objects[player] = nil
-    end
-end
-
--- 移动系统
-local Movement = {
-    BunnyHop = false,
-    Speed = false,
-    SpeedValue = 30,
-    Fly = false,
-    FlySpeed = 50,
-    BodyVel = nil,
-}
-
-function Movement:Update()
-    local char = LocalPlayer.Character
-    if not char then return end
-    
-    local humanoid = char:FindFirstChildOfClass("Humanoid")
-    local root = char:FindFirstChild("HumanoidRootPart")
-    if not humanoid or not root then return end
-    
-    -- BunnyHop
-    if self.BunnyHop and humanoid.FloorMaterial ~= Enum.Material.Air then
-        humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
-    end
-    
-    -- Speed
-    if self.Speed then
-        humanoid.WalkSpeed = self.SpeedValue
+    -- 高亮当前目标
+    if Config.ESP.ShowTarget and player == RageAimbot.CurrentTarget then
+        esp.Highlight.FillColor = Config.ESP.TargetColor
+        esp.Highlight.OutlineColor = Color3.fromRGB(255, 255, 0)
     else
-        humanoid.WalkSpeed = 16
-    end
-    
-    -- Fly
-    if self.Fly then
-        if not self.BodyVel then
-            self.BodyVel = Instance.new("BodyVelocity", root)
-            self.BodyVel.MaxForce = Vector3.new(100000, 100000, 100000)
-        end
-        
-        local vel = Vector3.new()
-        if UserInputService:IsKeyDown(Enum.KeyCode.W) then vel = vel + Camera.CFrame.LookVector * self.FlySpeed end
-        if UserInputService:IsKeyDown(Enum.KeyCode.S) then vel = vel - Camera.CFrame.LookVector * self.FlySpeed end
-        if UserInputService:IsKeyDown(Enum.KeyCode.A) then vel = vel - Camera.CFrame.RightVector * self.FlySpeed end
-        if UserInputService:IsKeyDown(Enum.KeyCode.D) then vel = vel + Camera.CFrame.RightVector * self.FlySpeed end
-        if UserInputService:IsKeyDown(Enum.KeyCode.Space) then vel = vel + Vector3.new(0, self.FlySpeed, 0) end
-        if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then vel = vel - Vector3.new(0, self.FlySpeed, 0) end
-        
-        self.BodyVel.Velocity = vel
-    else
-        if self.BodyVel then
-            self.BodyVel:Destroy()
-            self.BodyVel = nil
-        end
+        esp.Highlight.FillColor = Color3.fromRGB(255, 100, 100)
+        esp.Highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
     end
 end
 
--- 换肤系统
-local Skins = {
-    Enabled = false,
-    Applied = false,
-}
-
-function Skins:Apply()
-    if not self.Enabled or self.Applied or not LocalPlayer.Character then return end
-    
-    for _, obj in pairs(LocalPlayer.Character:GetDescendants()) do
-        if obj:IsA("MeshPart") or obj:IsA("Part") then
-            obj.Material = Enum.Material.Neon
-            obj.Color = Color3.fromRGB(150, 150, 255)
-        end
-    end
-    
-    self.Applied = true
-end
-
--- 视觉系统
-local Visuals = {
-    FullBright = false,
-    NoFog = false,
-    FOVChanger = false,
-    FOVValue = 90,
-}
-
-function Visuals:Apply()
-    local lighting = game:GetService("Lighting")
-    
-    if self.FullBright then
-        lighting.Brightness = 2
-        lighting.ClockTime = 14
-        lighting.GlobalShadows = false
-    end
-    
-    if self.NoFog then
-        lighting.FogEnd = 100000
-    end
-    
-    if self.FOVChanger then
-        Camera.FieldOfView = self.FOVValue
+local function RemoveESP(player)
+    if ESPObjects[player] then
+        ESPObjects[player].Highlight:Destroy()
+        ESPObjects[player] = nil
     end
 end
 
 -- ========================================
--- 创建UI界面
+-- 创建UI
 -- ========================================
 
-print("[Neverlose] 正在初始化...")
+print("[Neverlose] 正在加载RAGE模式...")
 
 if not LocalPlayer.Character then
     LocalPlayer.CharacterAdded:Wait()
@@ -2133,248 +2025,381 @@ end
 
 task.wait(1)
 
--- 初始化反作弊
-AntiCheat:Initialize()
-
--- 创建窗口
 local window = UI.CreateWindow({
-    Title = "Neverlose",
-    Subtitle = "Complete Edition",
-    LogoText = "NL",
+    Title = "Neverlose RAGE",
+    Subtitle = "Extreme Aimbot",
+    LogoText = "RAGE",
     ProfileName = LocalPlayer.Name,
-    ProfileSubtitle = "Premium User",
-    Width = 800,
-    Height = 612,
+    ProfileSubtitle = "Rage User",
+    Width = 600,
+    Height = 500,
     ToggleKey = Enum.KeyCode.Insert,
-    Accent = Color3.fromRGB(255, 75, 86),
+    Accent = Color3.fromRGB(255, 0, 0),
 })
 
--- ========================================
--- Rage标签页
--- ========================================
-local rageTab = window:CreateTab({Name = "暴力", Category = "自瞄", Icon = "Crosshair"})
+-- RAGE标签页
+local rageTab = window:CreateTab({Name = "RAGE", Category = "自瞄", Icon = "Crosshair"})
 
-local rageMain = rageTab:CreateSection({Name = "主要", Column = 1})
-rageMain:CreateToggle({Text = "启用", Default = false, Id = "rage.enabled"}):OnChanged(function(v) 
-    Rage.Enabled = v 
-    if v then Legit.Enabled = false end
+local rageMain = rageTab:CreateSection({Name = "暴力自瞄", Column = 1})
+rageMain:CreateToggle({Text = "启用RAGE", Default = false}):OnChanged(function(v) 
+    Config.Rage.Enabled = v
+    if v then
+        print("[Neverlose] RAGE模式已启用 - 瞬间锁定 + 自动开火")
+    end
 end)
-rageMain:CreateToggle({Text = "静默瞄准", Default = true, Id = "rage.silent"}):OnChanged(function(v) Rage.Silent = v end)
-rageMain:CreateToggle({Text = "自动开火", Default = false, Id = "rage.autofire"}):OnChanged(function(v) Rage.AutoFire = v end)
-rageMain:CreateSlider({Text = "视野", Min = 0, Max = 360, Default = 360, Suffix = "°", Id = "rage.fov"}):OnChanged(function(v) Rage.FOV = v end)
-
-local rageTarget = rageTab:CreateSection({Name = "选择", Column = 1})
-rageTarget:CreateDropdown({Text = "命中框", Options = {"Head", "UpperTorso", "LowerTorso", "HumanoidRootPart"}, Default = "Head", Id = "rage.hitbox"}):OnChanged(function(v) Rage.Hitbox = v end)
-
-local hitboxMenu = rageTarget:CreateSubmenu({Text = "多点", Title = "多点设置", Width = 274})
-hitboxMenu:CreateToggle({Text = "启用多点", Default = true, Id = "rage.multipoint"}):OnChanged(function(v) Rage.MultiPoint = v end)
-hitboxMenu:CreateSlider({Text = "头部多点", Min = 0, Max = 100, Default = 65, Suffix = "%", Id = "rage.headscale"})
-hitboxMenu:CreateSlider({Text = "身体多点", Min = 0, Max = 100, Default = 55, Suffix = "%", Id = "rage.bodyscale"})
-
-rageTarget:CreateToggle({Text = "预测", Default = true, Id = "rage.prediction"}):OnChanged(function(v) Rage.Prediction = v end)
-rageTarget:CreateToggle({Text = "Resolver", Default = true, Id = "rage.resolver"}):OnChanged(function(v) Resolver.Enabled = v end)
-
-local rageAdvanced = rageTab:CreateSection({Name = "其他", Column = 2})
-
--- Double Tap
-local dtToggle = rageAdvanced:CreateToggle({Text = "Double Tap", Default = false, Id = "rage.doubletap"})
-dtToggle:OnChanged(function(v) DoubleTap.Enabled = v end)
-
-local dtMenu = dtToggle:CreatePopover({Title = "Double Tap", Width = 274})
-dtMenu:CreateKeybind({Text = "快捷键", Default = Enum.KeyCode.V, Id = "dt.key"})
-dtMenu:CreateSlider({Text = "Shift量", Min = 1, Max = 16, Default = 14, Id = "dt.shift"})
-dtMenu:CreateDropdown({Text = "模式", Options = {"Defensive", "Offensive", "Adaptive"}, Default = "Defensive", Id = "dt.mode"})
-
--- No Spread
-local spreadToggle = rageAdvanced:CreateToggle({Text = "移除扩散", Default = false, Id = "rage.nospread"})
-local spreadMenu = spreadToggle:CreatePopover({Title = "移除扩散", Width = 274})
-spreadMenu:CreateDropdown({Text = "模式", Options = {"Full", "Partial", "Off"}, Default = "Full", Id = "spread.mode"})
-spreadMenu:CreateToggle({Text = "Seed校验", Default = true, Id = "spread.seed"})
-
--- ========================================
--- Anti-Aim标签页
--- ========================================
-local antiTab = window:CreateTab({Name = "反自瞄", Category = "自瞄", Icon = "Settings"})
-
-local antiMain = antiTab:CreateSection({Name = "主要", Column = 1})
-antiMain:CreateToggle({Text = "启用", Default = false, Id = "aa.enabled"}):OnChanged(function(v) AntiAim.Enabled = v end)
-
-local pitchMenu = antiMain:CreateSubmenu({Text = "俯仰", Title = "俯仰控制", Width = 274})
-pitchMenu:CreateDropdown({Text = "模式", Options = {"Down", "Up", "Jitter", "Custom"}, Default = "Down", Id = "aa.pitch"}):OnChanged(function(v) AntiAim.Pitch = v end)
-pitchMenu:CreateSlider({Text = "自定义角度", Min = -89, Max = 89, Default = -89, Suffix = "°", Id = "aa.pitchvalue"})
-
-local yawMenu = antiMain:CreateSubmenu({Text = "偏航", Title = "偏航控制", Width = 274})
-yawMenu:CreateDropdown({Text = "模式", Options = {"Backwards", "Spin", "Jitter", "Custom"}, Default = "Backwards", Id = "aa.yaw"}):OnChanged(function(v) AntiAim.YawMode = v end)
-yawMenu:CreateSlider({Text = "偏移", Min = -180, Max = 180, Default = 0, Suffix = "°", Id = "aa.yawadd"}):OnChanged(function(v) AntiAim.YawAdd = v end)
-yawMenu:CreateSlider({Text = "抖动", Min = 0, Max = 180, Default = 60, Suffix = "°", Id = "aa.yawjitter"})
-
-local bodyMenu = antiMain:CreateSubmenu({Text = "Body Yaw", Title = "Body Yaw", Width = 274})
-bodyMenu:CreateDropdown({Text = "模式", Options = {"Opposite", "Jitter", "Static"}, Default = "Opposite", Id = "aa.bodyyaw"})
-bodyMenu:CreateSlider({Text = "Fakelag限制", Min = 0, Max = 14, Default = 14, Id = "aa.fakelag"})
-
-antiMain:CreateToggle({Text = "反背刺", Default = true, Id = "aa.antibackstab"})
-antiMain:CreateToggle({Text = "边缘Yaw", Default = false, Id = "aa.edgeyaw"})
-
--- ========================================
--- Legit标签页
--- ========================================
-local legitTab = window:CreateTab({Name = "合法", Category = "自瞄", Icon = "Mouse"})
-
-local legitMain = legitTab:CreateSection({Name = "主要", Column = 1})
-legitMain:CreateToggle({Text = "启用", Default = false, Id = "legit.enabled"}):OnChanged(function(v) 
-    Legit.Enabled = v 
-    if v then Rage.Enabled = false end
+rageMain:CreateSlider({Text = "FOV范围", Min = 100, Max = 2000, Default = 1000, Suffix = " studs"}):OnChanged(function(v) 
+    Config.Rage.FOV = v 
+end)
+rageMain:CreateSlider({Text = "平滑度", Min = 0, Max = 10, Default = 0, Hint = "0 = 瞬间锁定"}):OnChanged(function(v) 
+    Config.Rage.Smoothness = v 
+    Config.Rage.InstantLock = (v == 0)
 end)
 
-local legitKey = legitMain:CreateKeybind({Text = "快捷键", Default = Enum.KeyCode.E, Id = "legit.key"})
-legitKey:OnChanged(function(v) Legit.Key = v end)
+local rageAuto = rageTab:CreateSection({Name = "自动功能", Column = 1})
+rageAuto:CreateToggle({Text = "自动开火", Default = true}):OnChanged(function(v) 
+    Config.Rage.AutoShoot = v
+    Config.AutoFire.Enabled = v
+end)
+rageAuto:CreateSlider({Text = "射击速度", Min = 0.01, Max = 0.5, Default = 0.05, Suffix = "s", Decimals = 2}):OnChanged(function(v) 
+    Config.AutoFire.FireRate = v 
+end)
+rageAuto:CreateDropdown({Text = "开火方式", Options = {"Mouse", "Tool", "Both"}, Default = "Mouse"}):OnChanged(function(v) 
+    Config.AutoFire.Method = v 
+end)
 
-legitMain:CreateSlider({Text = "FOV", Min = 5, Max = 180, Default = 80, Suffix = "°", Id = "legit.fov"}):OnChanged(function(v) Legit.FOV = v end)
-legitMain:CreateSlider({Text = "平滑度", Min = 1, Max = 20, Default = 10, Id = "legit.smooth"}):OnChanged(function(v) Legit.Smooth = v end)
+local rageTarget = rageTab:CreateSection({Name = "目标选择", Column = 2})
+rageTarget:CreateDropdown({Text = "命中框", Options = {"Head", "UpperTorso", "HumanoidRootPart", "LowerTorso"}, Default = "Head"}):OnChanged(function(v) 
+    Config.Rage.Hitbox = v 
+end)
+rageTarget:CreateToggle({Text = "穿墙射击", Default = true}):OnChanged(function(v) 
+    Config.Rage.AutoWallbang = v 
+end)
+rageTarget:CreateToggle({Text = "忽略队友", Default = true}):OnChanged(function(v) 
+    Config.Rage.IgnoreTeam = v 
+end)
+rageTarget:CreateToggle({Text = "自动切换目标", Default = true}):OnChanged(function(v) 
+    Config.Rage.SwitchTarget = v 
+end)
 
-local legitAdv = legitTab:CreateSection({Name = "高级", Column = 2})
-legitAdv:CreateToggle({Text = "后坐力补偿", Default = true, Id = "legit.rcs"}):OnChanged(function(v) Legit.RCS = v end)
-legitAdv:CreateSlider({Text = "RCS强度", Min = 0, Max = 100, Default = 85, Suffix = "%", Id = "legit.rcsamount"})
-legitAdv:CreateToggle({Text = "扳机机器人", Default = false, Id = "legit.trigger"})
-legitAdv:CreateSlider({Text = "触发延迟", Min = 0, Max = 200, Default = 50, Suffix = " ms", Id = "legit.triggerdelay"})
+local ragePred = rageTab:CreateSection({Name = "预测", Column = 2})
+ragePred:CreateToggle({Text = "移动预测", Default = true}):OnChanged(function(v) 
+    Config.Rage.Prediction = v 
+end)
+ragePred:CreateSlider({Text = "预测强度", Min = 0, Max = 0.5, Default = 0.2, Decimals = 2}):OnChanged(function(v) 
+    Config.Rage.PredictionStrength = v 
+end)
 
--- ========================================
--- 视觉标签页
--- ========================================
-local visualTab = window:CreateTab({Name = "视觉", Category = "通用", Icon = "Image"})
+-- ESP标签页
+local espTab = window:CreateTab({Name = "视觉", Category = "ESP", Icon = "Image"})
 
-local espSec = visualTab:CreateSection({Name = "玩家", Column = 1})
-espSec:CreateToggle({Text = "ESP启用", Default = false, Id = "esp.enabled"}):OnChanged(function(v) ESP.Enabled = v end)
-espSec:CreateToggle({Text = "Chams", Default = true, Id = "esp.chams"})
-espSec:CreateToggle({Text = "名称", Default = true, Id = "esp.name"})
-espSec:CreateToggle({Text = "血量", Default = true, Id = "esp.health"})
-espSec:CreateToggle({Text = "距离", Default = true, Id = "esp.distance"})
-espSec:CreateToggle({Text = "武器", Default = true, Id = "esp.weapon"})
+local espMain = espTab:CreateSection({Name = "ESP", Column = 1})
+espMain:CreateToggle({Text = "启用ESP", Default = true}):OnChanged(function(v) 
+    Config.ESP.Enabled = v 
+end)
+espMain:CreateToggle({Text = "高亮目标", Default = true}):OnChanged(function(v) 
+    Config.ESP.ShowTarget = v 
+end)
+espMain:CreateColorPicker({Text = "目标颜色", Default = Color3.fromRGB(255, 0, 0)}):OnChanged(function(v) 
+    Config.ESP.TargetColor = v 
+end)
 
-local espColor = visualTab:CreateSection({Name = "世界", Column = 2})
-espColor:CreateColorPicker({Text = "Chams颜色", Default = Color3.fromRGB(255, 100, 100), Id = "esp.chamscolor"})
-espColor:CreateSlider({Text = "最大距离", Min = 100, Max = 5000, Default = 2000, Suffix = " studs", Id = "esp.maxdist"})
+-- 信息标签页
+local infoTab = window:CreateTab({Name = "信息", Category = "其他", Icon = "Settings"})
 
-local visualOpt = visualTab:CreateSection({Name = "优化", Column = 2})
-visualOpt:CreateToggle({Text = "全亮", Default = false, Id = "visual.fullbright"}):OnChanged(function(v) Visuals.FullBright = v end)
-visualOpt:CreateToggle({Text = "去雾", Default = false, Id = "visual.nofog"}):OnChanged(function(v) Visuals.NoFog = v end)
-visualOpt:CreateToggle({Text = "FOV调整", Default = false, Id = "visual.fov"}):OnChanged(function(v) Visuals.FOVChanger = v end)
-visualOpt:CreateSlider({Text = "FOV值", Min = 70, Max = 120, Default = 90, Id = "visual.fovvalue"}):OnChanged(function(v) Visuals.FOVValue = v end)
+local infoSec = infoTab:CreateSection({Name = "状态", Column = 1})
+local statusLabel = infoSec:CreateLabel({Text = "等待启用...", Height = 200, Wrapped = true})
 
--- ========================================
--- 换肤标签页
--- ========================================
-local skinTab = window:CreateTab({Name = "换肤", Category = "通用", Icon = "Palette"})
-
-local skinMain = skinTab:CreateSection({Name = "武器", Column = 1})
-skinMain:CreateToggle({Text = "启用换肤", Default = false, Id = "skin.enabled"}):OnChanged(function(v) Skins.Enabled = v; Skins.Applied = false end)
-skinMain:CreateDropdown({Text = "刀具", Options = {"Butterfly", "Karambit", "M9 Bayonet", "Talon"}, Default = "Butterfly", Id = "skin.knife"})
-skinMain:CreateDropdown({Text = "刀具皮肤", Options = {"Doppler", "Fade", "Tiger Tooth", "Marble Fade"}, Default = "Doppler", Id = "skin.knifeskin"})
-skinMain:CreateDropdown({Text = "武器皮肤", Options = {"Asiimov", "Dragon Lore", "Howl", "Fade"}, Default = "Asiimov", Id = "skin.weaponskin"})
-
-local skinGlove = skinTab:CreateSection({Name = "手套", Column = 2})
-skinGlove:CreateDropdown({Text = "手套", Options = {"Sport", "Driver", "Hydra", "Specialist"}, Default = "Sport", Id = "skin.glove"})
-skinGlove:CreateDropdown({Text = "手套皮肤", Options = {"Vice", "Crimson Kimono", "Emerald Web", "Fade"}, Default = "Vice", Id = "skin.gloveskin"})
-skinGlove:CreateButton({Text = "刷新换肤", ButtonText = "应用"}):OnClick(function() Skins.Applied = false; Skins:Apply() end)
-
--- ========================================
--- 移动标签页
--- ========================================
-local moveTab = window:CreateTab({Name = "移动", Category = "通用", Icon = "Settings"})
-
-local moveBasic = moveTab:CreateSection({Name = "基础", Column = 1})
-moveBasic:CreateToggle({Text = "BunnyHop", Default = false, Id = "move.bhop"}):OnChanged(function(v) Movement.BunnyHop = v end)
-moveBasic:CreateToggle({Text = "速度增强", Default = false, Id = "move.speed"}):OnChanged(function(v) Movement.Speed = v end)
-moveBasic:CreateSlider({Text = "速度值", Min = 16, Max = 100, Default = 30, Id = "move.speedvalue"}):OnChanged(function(v) Movement.SpeedValue = v end)
-
-local moveAdv = moveTab:CreateSection({Name = "高级", Column = 1})
-moveAdv:CreateToggle({Text = "飞行", Default = false, Id = "move.fly"}):OnChanged(function(v) Movement.Fly = v end)
-moveAdv:CreateSlider({Text = "飞行速度", Min = 10, Max = 100, Default = 50, Id = "move.flyspeed"}):OnChanged(function(v) Movement.FlySpeed = v end)
-moveAdv:CreateLabel({Text = "飞行控制: WASD移动, Space上升, Shift下降", Wrapped = true, Height = 60})
-
-local moveTips = moveTab:CreateSection({Name = "提示", Column = 2})
-moveTips:CreateLabel({Text = "EdgeJump: 边缘自动跳跃", Wrapped = true, Height = 40})
-moveTips:CreateLabel({Text = "LongJump: 跳得更远", Wrapped = true, Height = 40})
-moveTips:CreateLabel({Text = "AutoStrafe: 空中自动转向", Wrapped = true, Height = 40})
-moveTips:CreateLabel({Text = "NoSlowdown: 无减速", Wrapped = true, Height = 40})
-
--- ========================================
--- 杂项标签页
--- ========================================
-local miscTab = window:CreateTab({Name = "杂项", Category = "其他", Icon = "Settings"})
-
-local miscMain = miscTab:CreateSection({Name = "功能", Column = 1})
-miscMain:CreateToggle({Text = "自动接受", Default = false, Id = "misc.autoaccept"})
-miscMain:CreateToggle({Text = "自动重生", Default = false, Id = "misc.autorespawn"})
-miscMain:CreateToggle({Text = "防AFK", Default = false, Id = "misc.antiafk"})
-
-local miscInfo = miscTab:CreateSection({Name = "其他", Column = 2})
-miscInfo:CreateToggle({Text = "水印", Default = true, Id = "misc.watermark"})
-miscInfo:CreateToggle({Text = "观察者列表", Default = true, Id = "misc.speclist"})
-miscInfo:CreateToggle({Text = "快捷键列表", Default = true, Id = "misc.keybinds"})
+-- 更新状态显示
+local function UpdateStatusLabel()
+    local text = ""
+    text = text .. "=== RAGE状态 ===\n\n"
+    text = text .. string.format("RAGE: %s\n", Config.Rage.Enabled and "✓ 已启用" or "✗ 未启用")
+    text = text .. string.format("当前目标: %s\n", RageAimbot.CurrentTarget and RageAimbot.CurrentTarget.Name or "无")
+    text = text .. string.format("锁定状态: %s\n", RageAimbot.Locked and "✓ 已锁定" or "✗ 未锁定")
+    text = text .. string.format("自动开火: %s\n", Config.Rage.AutoShoot and "✓ 已启用" or "✗ 未启用")
+    text = text .. string.format("FOV范围: %d studs\n", Config.Rage.FOV)
+    text = text .. string.format("命中框: %s\n", Config.Rage.Hitbox)
+    text = text .. "\n如果没有自动开火，检查游戏是否支持mouse1press()"
+    
+    statusLabel:Update({Text = text})
+end
 
 -- ========================================
 -- 初始化和主循环
 -- ========================================
 
--- ESP初始化
+-- 创建FOV圈
+pcall(CreateFOVCircle)
+
+-- 初始化ESP
 for _, player in ipairs(Players:GetPlayers()) do
     if player ~= LocalPlayer then
-        ESP:Create(player)
+        CreateESP(player)
     end
 end
 
-Players.PlayerAdded:Connect(function(player)
-    ESP:Create(player)
-end)
+Players.PlayerAdded:Connect(CreateESP)
+Players.PlayerRemoving:Connect(RemoveESP)
 
-Players.PlayerRemoving:Connect(function(player)
-    ESP:Remove(player)
-end)
-
--- 主更新循环
+-- 主循环
 RunService.RenderStepped:Connect(function()
-    -- Rage/Legit互斥
-    if Rage.Enabled then
-        Rage:Aim()
-    elseif Legit.Enabled then
-        Legit:Update()
-    end
+    -- RAGE自瞄
+    RageAimbot:Update()
     
-    -- Double Tap
-    DoubleTap:Update()
+    -- 更新FOV圈
+    pcall(UpdateFOVCircle)
     
-    -- Anti-Aim
-    AntiAim:Update()
-    
-    -- ESP
-    if ESP.Enabled then
+    -- 更新ESP
+    if Config.ESP.Enabled then
         for _, player in ipairs(Players:GetPlayers()) do
             if player ~= LocalPlayer then
-                ESP:Update(player)
+                pcall(UpdateESP, player)
             end
         end
     end
     
-    -- 移动
-    Movement:Update()
-    
-    -- 视觉
-    Visuals:Apply()
-    
-    -- 换肤
-    Skins:Apply()
+    -- 更新状态（每秒一次）
+    if tick() % 1 < 0.1 then
+        pcall(UpdateStatusLabel)
+    end
 end)
+
+-- ========================================
+-- 手机版UI支持 + 最小化按钮
+-- ========================================
+
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+local isMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+
+-- 创建最小化浮动按钮
+local minimizeBtn = Instance.new("TextButton")
+minimizeBtn.Name = "NeverloseMinimizeButton"
+minimizeBtn.Size = UDim2.new(0, isMobile and 80 or 60, 0, isMobile and 80 or 60)
+minimizeBtn.Position = UDim2.new(1, isMobile and -90 or -70, 1, isMobile and -90 or -70)
+minimizeBtn.AnchorPoint = Vector2.new(0, 0)
+minimizeBtn.BackgroundColor3 = Color3.fromRGB(255, 75, 86)
+minimizeBtn.BorderSizePixel = 0
+minimizeBtn.Text = "NL"
+minimizeBtn.TextColor3 = Color3.new(1, 1, 1)
+minimizeBtn.Font = Enum.Font.GothamBold
+minimizeBtn.TextSize = isMobile and 28 or 24
+minimizeBtn.ZIndex = 10000
+minimizeBtn.Visible = false
+minimizeBtn.Active = true
+minimizeBtn.Draggable = false
+
+-- 圆形按钮
+local btnCorner = Instance.new("UICorner")
+btnCorner.CornerRadius = UDim.new(1, 0)
+btnCorner.Parent = minimizeBtn
+
+-- 阴影效果
+local btnShadow = Instance.new("ImageLabel")
+btnShadow.Name = "Shadow"
+btnShadow.Size = UDim2.new(1, 10, 1, 10)
+btnShadow.Position = UDim2.new(0, -5, 0, -5)
+btnShadow.BackgroundTransparency = 1
+btnShadow.Image = "rbxasset://textures/ui/GuiImagePlaceholder.png"
+btnShadow.ImageColor3 = Color3.new(0, 0, 0)
+btnShadow.ImageTransparency = 0.5
+btnShadow.ZIndex = 9999
+btnShadow.Parent = minimizeBtn
+
+-- 悬停效果
+local isHovering = false
+minimizeBtn.MouseEnter:Connect(function()
+    isHovering = true
+    game:GetService("TweenService"):Create(minimizeBtn, TweenInfo.new(0.2), {Size = UDim2.new(0, (isMobile and 80 or 60) * 1.1, 0, (isMobile and 80 or 60) * 1.1)}):Play()
+end)
+
+minimizeBtn.MouseLeave:Connect(function()
+    isHovering = false
+    game:GetService("TweenService"):Create(minimizeBtn, TweenInfo.new(0.2), {Size = UDim2.new(0, isMobile and 80 or 60, 0, isMobile and 80 or 60)}):Play()
+end)
+
+minimizeBtn.Parent = PlayerGui
+
+-- 最小化状态
+local isMinimized = false
+
+-- 查找主窗口
+local function FindMainWindow()
+    for _, gui in pairs(PlayerGui:GetChildren()) do
+        if gui.Name == "NeverloseUI" or gui:FindFirstChild("Window") then
+            for _, obj in pairs(gui:GetDescendants()) do
+                if obj:IsA("Frame") and obj.Name:find("Window") or (obj:IsA("Frame") and obj.AbsoluteSize.X > 400) then
+                    return obj
+                end
+            end
+        end
+    end
+    return nil
+end
+
+-- 等待窗口创建
+task.wait(1)
+local mainWindow = FindMainWindow()
+
+if not mainWindow then
+    -- 尝试查找最大的Frame
+    local maxSize = 0
+    for _, gui in pairs(PlayerGui:GetChildren()) do
+        for _, obj in pairs(gui:GetDescendants()) do
+            if obj:IsA("Frame") and obj.AbsoluteSize.X > maxSize and obj.Visible then
+                maxSize = obj.AbsoluteSize.X
+                mainWindow = obj
+            end
+        end
+    end
+end
+
+print("[Neverlose] 主窗口:", mainWindow and mainWindow:GetFullName() or "未找到")
+
+-- 查找Logo并添加点击事件
+task.spawn(function()
+    task.wait(0.5)
+    
+    local logo = nil
+    for _, obj in pairs(PlayerGui:GetDescendants()) do
+        if obj:IsA("TextLabel") and (obj.Text == "NL" or obj.Text:find("Neverlose")) then
+            logo = obj
+            break
+        elseif obj:IsA("ImageLabel") and obj.Name:lower():find("logo") then
+            logo = obj
+            break
+        end
+    end
+    
+    if logo then
+        print("[Neverlose] 找到Logo:", logo:GetFullName())
+        
+        -- 创建透明按钮覆盖Logo
+        local logoBtn = Instance.new("TextButton")
+        logoBtn.Size = UDim2.new(1, 10, 1, 10)
+        logoBtn.Position = UDim2.new(0, -5, 0, -5)
+        logoBtn.BackgroundTransparency = 1
+        logoBtn.Text = ""
+        logoBtn.ZIndex = logo.ZIndex + 1
+        logoBtn.Parent = logo
+        
+        logoBtn.Activated:Connect(function()
+            isMinimized = true
+            if mainWindow then mainWindow.Visible = false end
+            minimizeBtn.Visible = true
+            minimizeBtn.BackgroundColor3 = Color3.fromRGB(100, 255, 100)
+            print("[Neverlose] 已最小化（通过Logo）")
+        end)
+        
+        print("[Neverlose] Logo点击事件已绑定")
+    else
+        print("[Neverlose] 未找到Logo，使用Insert键或最小化按钮")
+    end
+end)
+
+-- 最小化按钮点击事件
+minimizeBtn.Activated:Connect(function()
+    isMinimized = not isMinimized
+    
+    if mainWindow then
+        mainWindow.Visible = not isMinimized
+    end
+    
+    if isMinimized then
+        minimizeBtn.Visible = true
+        minimizeBtn.BackgroundColor3 = Color3.fromRGB(100, 255, 100)
+        minimizeBtn.Text = "☰"
+        print("[Neverlose] 已最小化")
+    else
+        minimizeBtn.Visible = false
+        minimizeBtn.BackgroundColor3 = Color3.fromRGB(255, 75, 86)
+        minimizeBtn.Text = "NL"
+        print("[Neverlose] 已展开")
+    end
+end)
+
+-- 拖动功能（手机版优化）
+local dragging = false
+local dragStart = nil
+local startPos = nil
+local dragThreshold = 10 -- 移动超过10像素才算拖动
+
+minimizeBtn.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+        dragging = true
+        dragStart = input.Position
+        startPos = minimizeBtn.Position
+        
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
+            end
+        end)
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if dragging and dragStart and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+        local delta = input.Position - dragStart
+        
+        -- 如果移动距离超过阈值，才开始拖动（防止误触）
+        if delta.Magnitude > dragThreshold then
+            minimizeBtn.Position = UDim2.new(
+                startPos.X.Scale,
+                startPos.X.Offset + delta.X,
+                startPos.Y.Scale,
+                startPos.Y.Offset + delta.Y
+            )
+        end
+    end
+end)
+
+-- Insert键切换（PC端）
+if not isMobile then
+    UserInputService.InputBegan:Connect(function(input, gameProcessed)
+        if gameProcessed then return end
+        
+        if input.KeyCode == Enum.KeyCode.Insert then
+            isMinimized = not isMinimized
+            
+            if mainWindow then
+                mainWindow.Visible = not isMinimized
+            end
+            
+            if isMinimized then
+                minimizeBtn.Visible = true
+            else
+                minimizeBtn.Visible = false
+            end
+        end
+    end)
+end
+
+-- 手机版自动显示提示
+if isMobile then
+    task.wait(2)
+    game.StarterGui:SetCore("SendNotification", {
+        Title = "手机版模式";
+        Text = "点击Logo或右下角按钮最小化\n可拖动按钮到任意位置";
+        Duration = 6;
+    })
+end
 
 -- 完成通知
 window:Notify({
-    Title = "Neverlose Complete",
-    Text = "所有功能已加载完成\n按Insert打开菜单",
+    Title = "Neverlose RAGE",
+    Text = "暴力模式已加载\n瞬间锁定 + 自动开火\n" .. (isMobile and "点Logo最小化" or "按Insert打开菜单"),
     Duration = 5
 })
 
 print("===========================================")
-print("[Neverlose] Complete Edition 已加载")
-print("[Neverlose] 按Insert打开菜单")
-print("[Neverlose] 所有功能已接入UI")
+print("[Neverlose] RAGE模式已加载")
+print("[Neverlose] 特性：")
+print("  - 瞬间锁定（平滑度0）")
+print("  - 自动开火")
+print("  - 1000 studs FOV")
+print("  - 穿墙射击")
+print("  - 自动切换目标")
+print("[Neverlose] 设备:", isMobile and "手机/平板" or "PC")
+print("[Neverlose] 操作:", isMobile and "点Logo或按钮最小化" or "按Insert切换")
+print("[Neverlose] 手机版支持已启用")
 print("===========================================")
